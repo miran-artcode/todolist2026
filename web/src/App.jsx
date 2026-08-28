@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { Camera, Check, Hash, Send, Loader, Upload, Calendar, School, PanelRightClose, RefreshCw, X, ChevronLeft, ChevronRight, FileText, AlertTriangle, ClipboardPaste, Plus, Users, Inbox, Pin, Image as ImageIcon, Bell, Megaphone, ClipboardList, Monitor, MapPin, Clock, ArrowLeft } from "lucide-react";
+import { fileKind, fileToText } from "./extract";
+import { scanTasks, scanEvents, scanTimetable } from "./scan";
 
 const S = {
   brand: "#3F0E40", brandText: "#BCABBC", brandHover: "#4A184C",
@@ -145,36 +147,6 @@ async function joinRegistryClass({ school, grade, classNo }) {
   try { await window.storage.set(REG_KEY, JSON.stringify(reg), true); } catch (e) { /* 무시 */ }
 }
 
-function fileKind(file) {
-  const n = (file.name || "").toLowerCase();
-  if (/\.(hwp|hwpx)$/.test(n)) return "hwp";
-  if (/\.(xlsx|xlsm|xls)$/.test(n)) return "excel";
-  if (/\.docx$/.test(n)) return "word";
-  if (/\.(doc|ppt|pptx|zip)$/.test(n)) return "office";
-  if (file.type === "application/pdf" || n.endsWith(".pdf")) return "pdf";
-  if (file.type && file.type.startsWith("image/")) return "image";
-  if ((file.type && file.type.startsWith("text/")) || /\.(txt|csv|md|json)$/.test(n)) return "text";
-  return "unknown";
-}
-
-async function excelToText(file) {
-  // 엑셀/워드 해석기는 덩치가 커서 파일을 실제로 넣을 때만 받아 온다
-  const XLSX = await import("xlsx");
-  const buf = await file.arrayBuffer();
-  const wb = XLSX.read(buf, { type: "array", cellDates: true });
-  return wb.SheetNames.map((name) => {
-    const rows = XLSX.utils.sheet_to_csv(wb.Sheets[name], { blankrows: false });
-    return `[시트: ${name}]\n${rows}`;
-  }).join("\n\n").slice(0, 20000);
-}
-
-async function wordToText(file) {
-  const mammoth = (await import("mammoth")).default;
-  const buf = await file.arrayBuffer();
-  const r = await mammoth.extractRawText({ arrayBuffer: buf });
-  return String(r.value || "").slice(0, 20000);
-}
-
 function imgSize(file) {
   return new Promise((res) => {
     const url = URL.createObjectURL(file);
@@ -188,9 +160,8 @@ function imgSize(file) {
 async function inspect(file) {
   const kind = fileKind(file);
   const info = { file, kind, name: file.name || "캡처 이미지", ok: true, msg: "" };
-  if (kind === "hwp") { info.ok = false; info.msg = "한글파일은 읽을 수 없습니다"; return info; }
   if (kind === "office") { info.ok = false; info.msg = "이 형식은 읽을 수 없습니다"; return info; }
-  if (kind === "excel" || kind === "word") return info;
+  if (kind === "excel" || kind === "word" || kind === "hwp") return info;
   if (kind === "unknown") { info.ok = false; info.msg = "지원하지 않는 형식입니다"; return info; }
   if (kind === "image") {
     const sz = await imgSize(file);
@@ -204,18 +175,22 @@ async function inspect(file) {
 
 async function toBlock(file) {
   const k = fileKind(file);
-  if (k === "excel") return { kind: "text", text: await excelToText(file), name: file.name };
-  if (k === "word") return { kind: "text", text: await wordToText(file), name: file.name };
-  if (k === "text") return { kind: "text", text: await file.text(), name: file.name };
+  // 글자가 심어진 문서는 브라우저 안에서 바로 긁는다. 여기서 끝나면 AI 도 API 키도 필요 없다.
+  if (k !== "image") {
+    const text = await fileToText(file, k);
+    if (text.trim().length >= 10) return { kind: "text", text, name: file.name };
+    if (k !== "pdf") return { kind: "unsupported", name: file.name };
+  }
+  // 스캔한 PDF 와 사진은 글자가 그림 속에 있어서 눈으로 봐야 한다
   const b64 = await new Promise((res, rej) => {
     const r = new FileReader();
     r.onload = () => res(r.result.split(",")[1]);
     r.onerror = () => rej(new Error("실패"));
     r.readAsDataURL(file);
   });
-  if (file.type === "application/pdf")
+  if (k === "pdf")
     return { kind: "doc", name: file.name, block: { type: "document", source: { type: "base64", media_type: "application/pdf", data: b64 } } };
-  if (file.type.startsWith("image/"))
+  if (file.type && file.type.startsWith("image/"))
     return { kind: "image", name: file.name, block: { type: "image", source: { type: "base64", media_type: file.type, data: b64 } } };
   return { kind: "unsupported", name: file.name };
 }
@@ -506,9 +481,15 @@ function CaptureView({ addItems, goCal, deptHint }) {
       }
       // 파일마다 차례로 기다리면 그만큼 느리다. 동시에 읽고 순서대로 붙인다.
       const blocks = await Promise.all(usable.map((f) => toBlock(f.file)));
+      const unread = [];
       for (const b of blocks) {
         if (b.kind === "text") body += `\n\n[${b.name}]\n${b.text}`;
         else if (b.block) parts.push(b.block);
+        else unread.push(b.name);
+      }
+      if (!body.trim() && parts.length === 0) {
+        setErr(`${unread.join(", ")} 에서 글자를 찾지 못했습니다. 스캔본이거나 암호가 걸린 문서일 수 있습니다. 내용을 복사해서 붙여넣어 보세요.`);
+        setBusy(false); return;
       }
       parts.push({ type: "text", text: `아래 자료는 한국 고등학교 교사가 받은 공문, 학교 메신저 내용, 카톡, 또는 그 캡처다.
 오늘은 ${TODAY} (${KDAY[parseISO(TODAY).getDay()]}요일).
@@ -551,9 +532,21 @@ quality 기준
 
 자료:
 ${body || "(첨부만 있음)"}` });
-      const res = await askClaude(parts);
+      // 글자를 이미 손에 쥐고 있으면 AI 없이도 규칙으로 뽑을 수 있다. AI 가 안 되면 이걸 쓴다.
+      const local = scanTasks(body, { today: TODAY, depts: deptHint });
+      let res, by = "ai";
+      try {
+        res = await askClaude(parts);
+        const got = Array.isArray(res) ? res : (res && Array.isArray(res.tasks) ? res.tasks : []);
+        if (got.length === 0 && local.tasks.length > 0) { res = local; by = "rule"; }
+      } catch (e) {
+        // 글자가 있으면 규칙이 읽은 걸 보여 준다. 그림뿐이면 눈이 필요하니 그대로 알린다.
+        if (!body.trim()) throw e;
+        res = local; by = "rule";
+      }
       const arr = Array.isArray(res) ? res : (res && Array.isArray(res.tasks) ? res.tasks : []);
       const meta = Array.isArray(res) ? { quality: "good", read: "", reason: "" } : (res || {});
+      meta.by = by;
       if (meta.quality === "none" || (!meta.read && arr.length === 0)) {
         setDiag({ kind: "none", read: meta.read || "", reason: meta.reason || "" });
         setBusy(false); return;
@@ -603,6 +596,11 @@ ${body || "(첨부만 있음)"}` });
               {meta.quality === "poor" ? "일부만 읽혔습니다" : "이렇게 읽었습니다"}
             </p>
             <p style={{ fontSize: 12.5, color: S.ink, margin: 0, lineHeight: 1.6 }}>{meta.read}</p>
+            {meta.by === "rule" && (
+              <p style={{ fontSize: 12, color: S.muted, margin: "7px 0 0", lineHeight: 1.6 }}>
+                AI 없이 문서에서 직접 읽었습니다. 날짜와 제목을 한 번 더 봐 주세요.
+              </p>
+            )}
             {meta.quality === "poor" && (
               <p style={{ fontSize: 12, color: S.yellowInk, margin: "7px 0 0", lineHeight: 1.6 }}>
                 흐리거나 잘려서 놓친 게 있을 수 있습니다. 전부 확인해 주세요.
@@ -704,12 +702,9 @@ ${body || "(첨부만 있음)"}` });
               <AlertTriangle size={14} color={S.red} style={{ marginTop: 1, flexShrink: 0 }} />
               <div>
                 <p style={{ fontSize: 12.5, fontWeight: 600, color: S.red, margin: 0 }}>{f.name} · {f.msg}</p>
-                {f.kind === "hwp" && (
-                  <p style={{ fontSize: 12, color: S.muted, margin: "4px 0 0", lineHeight: 1.6 }}>
-                    한글에서 문서를 연 뒤 Ctrl+A → Ctrl+C 하고, 아래 칸에 Ctrl+V 하세요.<br />
-                    또는 한글에서 PDF로 저장한 뒤 그 파일을 넣으세요.
-                  </p>
-                )}
+                <p style={{ fontSize: 12, color: S.muted, margin: "4px 0 0", lineHeight: 1.6 }}>
+                  문서를 연 뒤 Ctrl+A → Ctrl+C 하고, 아래 칸에 Ctrl+V 하세요.
+                </p>
               </div>
             </div>
           ))}
@@ -759,8 +754,8 @@ ${body || "(첨부만 있음)"}` });
         <p style={{ fontSize: 12.5, color: S.muted, margin: 0, lineHeight: 1.75 }}>
           공문 화면에서 캡처(Win+Shift+S) 후 이 창에서 Ctrl+V<br />
           카톡 대화 여러 줄을 긁어서 Ctrl+V<br />
-          PDF는 그대로 끌어다 놓기<br />
-          한글파일은 Ctrl+A → Ctrl+C 해서 붙여넣기
+          PDF·한글(hwp, hwpx)·엑셀·워드는 그대로 끌어다 놓기<br />
+          스캔한 문서나 사진은 캡처와 똑같이 처리됩니다
         </p>
       </div>
     </div>
@@ -1445,7 +1440,7 @@ function SchoolTab({ tt, setTt, events, setEvents }) {
     setBusy(what); setErr(""); setRead("");
     const info = await inspect(file);
     if (!info.ok) {
-      setErr(`${info.name} · ${info.msg}${info.kind === "hwp" ? ". 한글에서 Ctrl+A → Ctrl+C 한 뒤 PDF로 저장하거나, 엑셀·워드로 바꿔서 넣어 주세요." : ""}`);
+      setErr(`${info.name} · ${info.msg}`);
       setBusy(""); return;
     }
     try {
@@ -1454,6 +1449,7 @@ function SchoolTab({ tt, setTt, events, setEvents }) {
       let extra = "";
       if (b.kind === "text") extra = `\n\n자료:\n${b.text}`;
       else if (b.block) parts.push(b.block);
+      else { setErr(`${info.name} 에서 글자를 찾지 못했습니다`); setBusy(""); return; }
 
       if (what === "tt") {
         parts.push({ type: "text", text: `한국 고등학교 교사의 개인 주간 시간표다. 월~금 각 요일 1~7교시에 담당 학급을 "학년-반" 형식으로 넣어라. 수업 없는 교시는 빈 문자열.
@@ -1461,7 +1457,11 @@ function SchoolTab({ tt, setTt, events, setEvents }) {
 JSON 객체 하나만. 설명 없이.
 {"read":"읽어낸 내용 60자 이내","월":["3-2","","2-1","","","1-4",""],"화":[],"수":[],"목":[],"금":[]}
 각 요일 배열은 정확히 7개 문자열.${extra}` });
-        const p2 = await askClaude(parts);
+        // 엑셀 시간표는 칸 모양이 뻔해서 AI 없이도 읽힌다. AI 를 못 부르면 이걸 쓴다.
+        const local = b.kind === "text" ? scanTimetable(b.text) : null;
+        let p2;
+        try { p2 = await askClaude(parts); }
+        catch (e2) { if (!local) throw e2; p2 = local; }
         const clean = {};
         DAYS.forEach((d) => {
           const a = Array.isArray(p2[d]) ? p2[d].slice(0, 7) : [];
@@ -1486,7 +1486,10 @@ kind 는 아래 넷 중 하나
 - 방학처럼 기간이면 start 와 end 를 모두 채운다. 하루면 end 를 start 와 같게
 - 연도가 없으면 오늘 기준 가장 가까운 미래로
 - swap 이 아니면 swap 키는 넣지 않는다${extra}` });
-        const p2 = await askClaude(parts);
+        const local = b.kind === "text" ? scanEvents(b.text, { today: TODAY }) : null;
+        let p2;
+        try { p2 = await askClaude(parts); }
+        catch (e2) { if (!local || !local.events.length) throw e2; p2 = local; }
         const list = Array.isArray(p2) ? p2 : (p2.events || []);
         // 달력은 날짜를 문자열로 비교한다. YYYY-MM-DD 가 아니면 아무 날에도 안 걸린다.
         const day = (v) => (isDay(v) ? String(v) : "");
