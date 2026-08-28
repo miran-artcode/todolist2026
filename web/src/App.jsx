@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { createPortal } from "react-dom";
-import { Camera, Check, Hash, Send, Loader, Upload, Calendar, School, PanelRightClose, RefreshCw, X, ChevronLeft, ChevronRight, FileText, AlertTriangle, ClipboardPaste, Plus, Users, Inbox, Pin, Image as ImageIcon, Bell, Megaphone, ClipboardList, Monitor, MapPin, Clock, ArrowLeft } from "lucide-react";
+import { Camera, Check, Hash, Send, Loader, Upload, Calendar, School, PanelRightClose, RefreshCw, X, ChevronLeft, ChevronRight, FileText, AlertTriangle, ClipboardPaste, Plus, Users, Inbox, Pin, Image as ImageIcon, Bell, Megaphone, ClipboardList, Monitor, Smartphone, MapPin, Clock, ArrowLeft } from "lucide-react";
 import { fileKind, fileToText } from "./extract";
 import { scanTasks, scanEvents, scanTimetable } from "./scan";
 
@@ -74,6 +74,15 @@ const CLASS_NOS = Array.from({ length: 12 }, (_, i) => String(i + 1));
 const clsName = (p) => `${p.grade}-${p.classNo}`;
 const noticeKey = (school) => `notice1-${slug(school)}`;
 const isClass = (p) => !!p && p.role === "class";
+
+// 기기 연결. 컴퓨터 위젯과 휴대폰에 같은 코드를 넣으면 개인 내용을 같이 본다.
+// 코드는 이 기기에만 남기고(localStorage), 내용만 공유 저장소에 올린다.
+const CODE_KEY = "desk-sync-code";
+const deskKey = (code) => `desk1-${slug(code)}`;
+const loadCode = () => { try { return localStorage.getItem(CODE_KEY) || ""; } catch (e) { return ""; } };
+const saveCode = (c) => { try { if (c) localStorage.setItem(CODE_KEY, c); else localStorage.removeItem(CODE_KEY); } catch (e) { /* 무시 */ } };
+// 휴대폰처럼 좁은 화면은 위젯 화면으로 연다. 전체 화면은 버튼으로 간다.
+const narrow = () => typeof window !== "undefined" && window.innerWidth < 640;
 
 // "미술실로", "본관으로" — 받침을 보고 조사를 고른다.
 function eulRo(w) {
@@ -245,8 +254,13 @@ export default function App() {
   const [ready, setReady] = useState(false);
   const [view, setView] = useState("clip");
   const [sel, setSel] = useState(null);
-  const [widget, setWidget] = useState(false);
+  const [widget, setWidget] = useState(narrow);
   const [syncing, setSyncing] = useState(false);
+  const [code, setCode] = useState(loadCode);
+  const [cloudSeen, setCloudSeen] = useState(false);
+  const [syncAt, setSyncAt] = useState(null);
+  const lastSync = useRef(null); // 마지막으로 주고받은 내용. 내가 올린 것이 돌아와도 다시 넣지 않게.
+  const syncKey = code ? deskKey(code) : null;
   const pop = usePopOut();
 
   useEffect(() => {
@@ -258,7 +272,39 @@ export default function App() {
       setReady(true);
     })();
   }, []);
-  useEffect(() => { if (ready) window.storage.set("teacher-desk2", JSON.stringify({ me, tt, items, events })).catch(() => {}); }, [me, tt, items, events, ready]);
+  // 같은 연결 코드를 쓰는 기기가 올린 내용을 받아 화면에 넣는다.
+  // 내가 올린 것이 그대로 돌아온 것은 흘려보낸다.
+  useEffect(() => {
+    setCloudSeen(false);
+    lastSync.current = null; // 코드를 바꾸면 저쪽 내용과 견줄 기준도 새로 잡는다
+    if (!ready || !syncKey) return;
+    let on = true;
+    const off = window.storage.subscribe(syncKey, (raw) => {
+      if (!on) return;
+      setCloudSeen(true); // 저쪽 내용을 확인하기 전에는 올리지 않는다
+      if (raw == null || raw === lastSync.current) return;
+      let s;
+      try { s = JSON.parse(raw); } catch (e) { return; } // 깨진 내용은 버린다
+      if (!s.me || isClass(s.me)) return; // 빈 상태와 학급 컴퓨터 상태는 받지 않는다
+      lastSync.current = raw;
+      setMe(s.me); setTt(s.tt || DEFAULT_TT); setItems(s.items || []); setEvents(s.events || []);
+      setSyncAt(new Date());
+    });
+    return () => { on = false; off(); };
+  }, [ready, syncKey]);
+
+  useEffect(() => {
+    if (!ready) return;
+    const payload = JSON.stringify({ me, tt, items, events });
+    window.storage.set("teacher-desk2", payload).catch(() => {});
+    // 저쪽 내용을 아직 못 본 채로 올리면 남의 기기 내용을 덮어 버린다.
+    if (!syncKey || !cloudSeen || !me || isClass(me) || payload === lastSync.current) return;
+    const t = setTimeout(() => {
+      lastSync.current = payload;
+      window.storage.set(syncKey, payload, true).then(() => setSyncAt(new Date())).catch(() => {});
+    }, 700);
+    return () => clearTimeout(t);
+  }, [me, tt, items, events, ready, syncKey, cloudSeen]);
 
   // 자정을 넘겨도 날짜가 어제로 남아 있지 않게 한다.
   const [, setDayTick] = useState(TODAY);
@@ -356,7 +402,8 @@ export default function App() {
   const addItems = (arr) => setItems((p) => [...p, ...arr]);
 
   if (!ready) return <Shell><p style={{ padding: 40, color: S.muted }}>불러오는 중</p></Shell>;
-  if (!me) return <Setup onDone={(p) => { if (isClass(p)) joinRegistryClass(p); else joinRegistry(p); setMe(p); }} />;
+  const setMyCode = (c) => { saveCode(c); setCode(c); };
+  if (!me) return <Setup onDone={(p) => { if (isClass(p)) joinRegistryClass(p); else joinRegistry(p); setMe(p); }} code={code} onCode={setMyCode} />;
 
   if (isClass(me)) {
     return (
@@ -392,19 +439,18 @@ export default function App() {
             <button onClick={() => setWidget(false)} style={ghostBtn}>전체 화면으로</button>
           </div>
         ) : (
-          <div style={{ padding: "4px 13px 18px", width: 320 }}>
+          <div style={{ padding: "4px 13px 18px", width: "min(320px, 100%)", boxSizing: "border-box" }}>
             {typeof window !== "undefined" && window.desk && window.desk.isElectron ? (
               <button onClick={() => window.desk.toggleTop()} style={{ ...primaryBtn, width: "100%" }}>
                 <Pin size={15} /><span style={{ marginLeft: 7 }}>항상 위에 두기 켜고 끄기</span>
               </button>
-            ) : (
+            ) : pop.supported ? (
               <button
                 onClick={async () => { const done = await pop.open(); if (!done) alert("이 브라우저에서는 안 됩니다. 크롬이나 엣지 최신 버전에서 열어 주세요."); }}
-                disabled={!pop.supported}
-                style={{ ...primaryBtn, width: "100%", opacity: pop.supported ? 1 : 0.45 }}>
-                <Pin size={15} /><span style={{ marginLeft: 7 }}>{pop.supported ? "항상 위에 띄우기" : "이 브라우저는 지원 안 함"}</span>
+                style={{ ...primaryBtn, width: "100%" }}>
+                <Pin size={15} /><span style={{ marginLeft: 7 }}>항상 위에 띄우기</span>
               </button>
-            )}
+            ) : null}
             <button onClick={() => setWidget(false)} style={{ ...ghostBtn, width: "100%", marginTop: 8, justifyContent: "center" }}>전체 화면으로</button>
           </div>
         )}
@@ -427,6 +473,7 @@ export default function App() {
             {view === "tt" && <SchoolTab tt={tt} setTt={setTt} events={events} setEvents={setEvents} />}
             {view === "notice" && <NoticeComposer me={me} tt={tt} pushNotice={pushNotice} onSent={() => setView("noticed")} />}
             {view === "noticed" && <SentNotices me={me} notices={notices} onRefresh={pullNotices} />}
+            {view === "sync" && <SyncView code={code} syncAt={syncAt} onSave={setMyCode} />}
           </div>
         </div>
       </div>
@@ -831,9 +878,98 @@ function Shell({ children }) {
   );
 }
 
-function Setup({ onDone }) {
+// ── 기기 연결 ────────────────────────────────────────────
+// 컴퓨터 위젯과 휴대폰에 같은 코드를 넣으면 담은 일정·시간표를 같이 본다.
+// 코드가 곧 저장소 열쇠라서, 남이 못 맞출 말이어야 한다.
+
+function CodeForm({ code, onSave }) {
+  const [v, setV] = useState(code || "");
+  useEffect(() => { setV(code || ""); }, [code]);
+  const clean = slug(v.trim());
+  const short = v.trim() && clean.length < 4;
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <input value={v} onChange={(e) => setV(e.target.value)} placeholder="예) 미란수학2026" style={{ ...inputStyle, flex: 1 }} />
+        <button onClick={() => onSave(clean)} disabled={clean.length < 4}
+          style={{ ...primaryBtn, flexShrink: 0, opacity: clean.length < 4 ? 0.45 : 1, cursor: clean.length < 4 ? "default" : "pointer" }}>
+          연결
+        </button>
+      </div>
+      {short && <p style={{ fontSize: 12, color: S.red, margin: "7px 0 0" }}>한글·영문·숫자로 네 글자 넘게 적어 주세요.</p>}
+      {code && <button onClick={() => onSave("")} style={{ ...ghostBtn, marginTop: 9 }}>연결 끊기 (이 기기만)</button>}
+    </div>
+  );
+}
+
+function SyncView({ code, syncAt, onSave }) {
+  const here = typeof window !== "undefined" ? window.location.origin : "";
+  const hhmm = syncAt ? `${String(syncAt.getHours()).padStart(2, "0")}:${String(syncAt.getMinutes()).padStart(2, "0")}` : "";
+  return (
+    <div style={{ padding: "22px 26px", maxWidth: 580 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 7 }}>
+        <Smartphone size={18} color={S.brand} />
+        <h2 style={{ fontSize: 16.5, fontWeight: 700, margin: 0 }}>휴대폰에서 이어 보기</h2>
+      </div>
+      <p style={{ fontSize: 13, color: S.muted, margin: "0 0 18px", lineHeight: 1.7 }}>
+        컴퓨터와 휴대폰에 <b style={{ color: S.ink }}>같은 연결 코드</b>를 넣으면 담은 일정과 시간표를 두 곳에서 같이 봅니다.
+        한쪽에서 고치면 다른 쪽도 몇 초 안에 따라 바뀝니다.
+      </p>
+      <CodeForm code={code} onSave={onSave} />
+      {code && (
+        <p style={{ fontSize: 12.5, color: S.green, fontWeight: 600, margin: "12px 0 0" }}>
+          연결됨 · {syncAt ? `${hhmm} 에 맞췄습니다` : "기다리는 중"}
+        </p>
+      )}
+      <div style={{ margin: "18px 0 0", padding: "13px 15px", background: S.gray, borderRadius: 8 }}>
+        <p style={{ fontSize: 12.5, fontWeight: 700, margin: "0 0 7px" }}>휴대폰에서 여는 법</p>
+        <ol style={{ fontSize: 12.5, color: S.muted, margin: 0, paddingLeft: 18, lineHeight: 1.9 }}>
+          <li>휴대폰 브라우저로 <b style={{ color: S.ink }}>{here}</b> 를 엽니다</li>
+          <li>첫 화면에서 <b style={{ color: S.ink }}>휴대폰 · 쓰던 기기와 연결</b>을 고르고 같은 코드를 넣습니다</li>
+          <li>브라우저 메뉴의 <b style={{ color: S.ink }}>홈 화면에 추가</b>를 누르면 앱처럼 열립니다</li>
+        </ol>
+      </div>
+      <p style={{ fontSize: 12, color: S.yellowInk, background: S.yellowSoft, padding: "10px 12px", borderRadius: 7, margin: "14px 0 0", lineHeight: 1.7 }}>
+        코드를 아는 사람은 이 내용을 볼 수 있습니다. 이름이나 생일처럼 쉬운 말 대신 남이 못 맞출 말을 쓰세요.
+        이미 올라가 있는 내용이 있으면 <b>그 내용이 새로 연결한 기기로 내려옵니다.</b>
+      </p>
+    </div>
+  );
+}
+
+// 새 기기에서 설정을 다시 하지 않고 쓰던 내용을 그대로 받아 오는 길.
+function LinkSetup({ code, onCode, onBack }) {
+  return (
+    <Shell>
+      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+        <div style={{ width: "min(430px, 100%)", boxSizing: "border-box", background: S.bg, borderRadius: 10, padding: 30, border: `1px solid ${S.line}` }}>
+          <button onClick={onBack} style={{ ...bare, display: "flex", alignItems: "center", gap: 5, fontSize: 12.5, color: S.muted, cursor: "pointer", marginBottom: 12 }}>
+            <ArrowLeft size={14} /> 뒤로
+          </button>
+          <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 6 }}>
+            <Smartphone size={20} color={S.brand} />
+            <h1 style={{ fontSize: 18, fontWeight: 700, margin: 0 }}>쓰던 기기와 연결</h1>
+          </div>
+          <p style={{ fontSize: 13, color: S.muted, margin: "0 0 18px", lineHeight: 1.7 }}>
+            컴퓨터에서 정해 둔 연결 코드를 넣으면 시간표와 담은 일정이 그대로 내려옵니다. 설정을 다시 하지 않아도 됩니다.
+          </p>
+          <CodeForm code={code} onSave={onCode} />
+          {code && (
+            <p style={{ fontSize: 12.5, color: S.muted, margin: "14px 0 0", lineHeight: 1.7 }}>
+              연결했습니다. 컴퓨터 쪽 내용을 기다리는 중입니다.<br />
+              한참 이 화면이면 컴퓨터에서 <b style={{ color: S.ink }}>휴대폰 연결</b>에 같은 코드가 들어가 있는지 확인해 주세요.
+            </p>
+          )}
+        </div>
+      </div>
+    </Shell>
+  );
+}
+
+function Setup({ onDone, code, onCode }) {
   const [role, setRole] = useState(null);
   if (role === null) return <RolePick onPick={setRole} />;
+  if (role === "link") return <LinkSetup code={code} onCode={onCode} onBack={() => setRole(null)} />;
   if (role === "class") return <ClassSetup onDone={onDone} onBack={() => setRole(null)} />;
   return <TeacherSetup onDone={onDone} onBack={() => setRole(null)} />;
 }
@@ -848,7 +984,7 @@ function RolePick({ onPick }) {
   return (
     <Shell>
       <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
-        <div style={{ width: 430, background: S.bg, borderRadius: 10, padding: 30, border: `1px solid ${S.line}` }}>
+        <div style={{ width: "min(430px, 100%)", boxSizing: "border-box", background: S.bg, borderRadius: 10, padding: 30, border: `1px solid ${S.line}` }}>
           <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 6 }}>
             <School size={20} color={S.brand} />
             <h1 style={{ fontSize: 19, fontWeight: 700, margin: 0 }}>이 컴퓨터는</h1>
@@ -874,6 +1010,15 @@ function RolePick({ onPick }) {
               <span style={{ display: "block", fontSize: 12.5, color: S.muted, marginTop: 2 }}>선생님이 보낸 호출·전달·과제를 큰 글씨로 띄웁니다</span>
             </span>
           </button>
+          <button onClick={() => onPick("link")} style={{ ...card, marginBottom: 0 }}>
+            <div style={{ width: 42, height: 42, borderRadius: 8, background: S.blue, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+              <Smartphone size={20} color="#fff" />
+            </div>
+            <span style={{ flex: 1 }}>
+              <span style={{ display: "block", fontSize: 15, fontWeight: 700 }}>휴대폰 · 쓰던 기기와 연결</span>
+              <span style={{ display: "block", fontSize: 12.5, color: S.muted, marginTop: 2 }}>연결 코드만 넣으면 컴퓨터에 담아 둔 내용이 그대로 보입니다</span>
+            </span>
+          </button>
         </div>
       </div>
     </Shell>
@@ -894,7 +1039,7 @@ function ClassSetup({ onDone, onBack }) {
   return (
     <Shell>
       <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
-        <div style={{ width: 430, background: S.bg, borderRadius: 10, padding: 30, border: `1px solid ${S.line}` }}>
+        <div style={{ width: "min(430px, 100%)", boxSizing: "border-box", background: S.bg, borderRadius: 10, padding: 30, border: `1px solid ${S.line}` }}>
           <button onClick={onBack} style={{ ...bare, display: "flex", alignItems: "center", gap: 5, fontSize: 12.5, color: S.muted, cursor: "pointer", marginBottom: 12 }}>
             <ArrowLeft size={14} /> 뒤로
           </button>
@@ -970,7 +1115,7 @@ function TeacherSetup({ onDone, onBack }) {
   return (
     <Shell>
       <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
-        <div style={{ width: 430, background: S.bg, borderRadius: 10, padding: 30, border: `1px solid ${S.line}` }}>
+        <div style={{ width: "min(430px, 100%)", boxSizing: "border-box", background: S.bg, borderRadius: 10, padding: 30, border: `1px solid ${S.line}` }}>
           <button onClick={onBack} style={{ ...bare, display: "flex", alignItems: "center", gap: 5, fontSize: 12.5, color: S.muted, cursor: "pointer", marginBottom: 12 }}>
             <ArrowLeft size={14} /> 뒤로
           </button>
@@ -1120,6 +1265,7 @@ function Sidebar({ me, groups, sel, setSel, view, setView, pending, feed, onRese
     { k: "notice", label: "학급 알림", Icon: Megaphone },
     { k: "noticed", label: "보낸 학급 알림", Icon: Monitor },
     { k: "tt", label: "시간표", Icon: School },
+    { k: "sync", label: "휴대폰 연결", Icon: Smartphone },
   ];
   return (
     <div style={{ width: 218, background: S.brand, color: "#fff", display: "flex", flexDirection: "column", flexShrink: 0 }}>
@@ -1579,7 +1725,7 @@ function WidgetPanel({ dayInfo, items, inbox, setItems, pinned }) {
   const pend = inbox.filter((m) => !items.some((i) => i.src === m.id));
   return (
     <Shell>
-      <div style={{ width: 320, minHeight: "100vh", background: S.bg, borderRight: `1px solid ${S.line}` }}>
+      <div style={{ width: "min(320px, 100%)", minHeight: "100vh", background: S.bg, borderRight: `1px solid ${S.line}` }}>
         <div data-drag style={{ background: S.brand, color: "#fff", padding: "11px 13px", display: "flex", alignItems: "center", gap: 8 }}>
           <span style={{ fontSize: 13.5, fontWeight: 700 }}>{fmtK(TODAY)}</span>
           {pinned && <Pin size={13} color="#CFC3CF" style={{ marginLeft: "auto" }} />}
