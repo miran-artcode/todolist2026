@@ -3,7 +3,7 @@ const path = require("path");
 const fs = require("fs");
 
 // 배포한 웹 주소. 빌드 전에 바꾸거나 APP_URL 환경변수로 넘긴다.
-const APP_URL = process.env.APP_URL || "https://project-1512580517596427239.web.app";
+const APP_URL = process.env.APP_URL || "https://seoul-educaion.web.app";
 
 const cfgPath = path.join(app.getPath("userData"), "window.json");
 const defaults = { w: 380, h: 780, x: null, y: null, top: true, widget: true };

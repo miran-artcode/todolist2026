@@ -90,6 +90,8 @@ firebase deploy --only hosting
 
 프로젝트와 배포 경로는 `.firebaserc` 와 `firebase.json` 에 이미 잡혀 있어서 `firebase init` 을 다시 할 필요는 없습니다.
 
-배포가 끝나면 `https://project-1512580517596427239.web.app` 주소가 나옵니다. 이 주소를 `APP_URL` 로 넘겨서 위젯을 빌드하면 됩니다.
+주소는 `https://seoul-educaion.web.app` 입니다. `main.js` 의 `APP_URL` 기본값으로 박아뒀으니 위젯을 빌드할 때 환경변수를 따로 넘기지 않아도 됩니다.
+
+한 프로젝트 안에 사이트가 둘 있습니다. `seoul-educaion` 이 실제로 쓰는 것이고, `project-1512580517596427239` 는 처음 만들어진 기본 사이트입니다. `firebase.json` 의 `site` 로 배포 대상을 정합니다.
 
 Firebase 설정은 `web/src/firebase.js` 에 있습니다. 웹 API 키는 공개되어도 되는 값입니다. 실제 접근 제어는 Firestore 보안 규칙에서 합니다.
