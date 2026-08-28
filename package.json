@@ -1,0 +1,43 @@
+{
+  "name": "today-work",
+  "version": "0.1.0",
+  "description": "교사용 업무 위젯",
+  "main": "main.js",
+  "author": "teacher-hackathon",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win",
+    "portable": "electron-builder --win portable",
+    "installer": "electron-builder --win nsis"
+  },
+  "devDependencies": {
+    "electron": "^32.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "kr.teacher.todaywork",
+    "productName": "오늘업무",
+    "files": ["main.js", "preload.js", "package.json"],
+    "directories": { "output": "release" },
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ],
+      "artifactName": "오늘업무-${version}-${env.TARGET_EXT}.${ext}"
+    },
+    "nsis": {
+      "perMachine": false,
+      "oneClick": true,
+      "allowElevation": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "오늘업무",
+      "deleteAppDataOnUninstall": false
+    },
+    "portable": {
+      "artifactName": "오늘업무-포터블-${version}.exe"
+    }
+  }
+}
