@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
-import { Camera, Check, Hash, Send, Loader, Upload, Calendar, School, PanelRightClose, RefreshCw, X, ChevronLeft, ChevronRight, FileText, AlertTriangle, ClipboardPaste, Plus, Users, Inbox, Pin, Image as ImageIcon } from "lucide-react";
+import { createPortal } from "react-dom";
+import { Camera, Check, Hash, Send, Loader, Upload, Calendar, School, PanelRightClose, RefreshCw, X, ChevronLeft, ChevronRight, FileText, AlertTriangle, ClipboardPaste, Plus, Users, Inbox, Pin, Image as ImageIcon, Bell, Megaphone, ClipboardList, Monitor, MapPin, Clock, ArrowLeft } from "lucide-react";
 
 const S = {
   brand: "#3F0E40", brandText: "#BCABBC", brandHover: "#4A184C",
@@ -33,7 +34,10 @@ const addDays = (s, n) => { const d = parseISO(s); d.setDate(d.getDate() + n); r
 const fmtK = (s) => { const d = parseISO(s); return `${d.getMonth() + 1}월 ${d.getDate()}일 ${KDAY[d.getDay()]}`; };
 const fmtShort = (s) => { const d = parseISO(s); return `${d.getMonth() + 1}/${d.getDate()} ${KDAY[d.getDay()]}`; };
 const diffDays = (a, b) => Math.round((parseISO(b) - parseISO(a)) / 86400000);
-const TODAY = iso(new Date());
+// 학급 컴퓨터와 위젯은 며칠씩 켜 둔다. 자정이 지나면 이 값을 갱신해야 한다.
+let TODAY = iso(new Date());
+const bumpToday = () => { const t = iso(new Date()); if (t === TODAY) return false; TODAY = t; return true; };
+const isDay = (v) => /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(String(v || ""));
 const startOfWeek = (s2) => { const w = parseISO(s2).getDay(); return addDays(s2, w === 0 ? -6 : 1 - w); };
 const rel = (d) => { const n = diffDays(TODAY, d); return n < 0 ? "지남" : n === 0 ? "오늘" : n === 1 ? "내일" : `${n}일 뒤`; };
 const slug = (s) => String(s).replace(/[^가-힣a-zA-Z0-9]/g, "").slice(0, 20);
@@ -54,6 +58,48 @@ function roleLabel(p) {
   if (p.homeroom && p.grade && p.classNo) return `${p.grade}-${p.classNo} 담임`;
   if (p.homeroom && p.grade) return `${p.grade}학년 담임`;
   return "비담임";
+}
+
+// ── 학급 알림 ────────────────────────────────────────────────
+// 교사가 학급 컴퓨터로 보내는 세 가지. 호출은 그날, 전달은 표시 종료일까지,
+// 과제는 마감일까지 교실 화면에 떠 있는다.
+const NOTICE_KIND = {
+  call: { label: "호출", color: "#E01E5A", bg: "#FCE7EE", Icon: Bell, dateLabel: "호출 날짜" },
+  info: { label: "전달", color: "#1264A3", bg: "#E3F0F8", Icon: Megaphone, dateLabel: "이 날짜까지 띄우기" },
+  task: { label: "과제", color: "#007A5A", bg: "#E8F5F0", Icon: ClipboardList, dateLabel: "제출 마감" },
+};
+const CLASS_NOS = Array.from({ length: 12 }, (_, i) => String(i + 1));
+const clsName = (p) => `${p.grade}-${p.classNo}`;
+const noticeKey = (school) => `notice1-${slug(school)}`;
+const isClass = (p) => !!p && p.role === "class";
+
+// "미술실로", "본관으로" — 받침을 보고 조사를 고른다.
+function eulRo(w) {
+  const s = String(w || "").trim();
+  if (!s) return "로";
+  const c = s.charCodeAt(s.length - 1);
+  if (c >= 0xac00 && c <= 0xd7a3) { const j = (c - 0xac00) % 28; return j === 0 || j === 8 ? "로" : "으로"; }
+  return "로";
+}
+// "김민준" → "김민준 학생", "미술동아리" → "미술동아리 학생", 빈칸이면 반 전체
+function targetText(t) {
+  const s = String(t || "").trim();
+  if (!s) return "우리 반 전체";
+  return /(학생|학생들|전원|모두)$/.test(s) ? s : `${s} 학생`;
+}
+function noticeText(n) {
+  if (n.kind === "call") {
+    const where = n.place ? `${n.place}${eulRo(n.place)} ` : "";
+    const when = n.time ? `${n.time}까지 ` : "";
+    return `${where}${when}오세요`.trim();
+  }
+  return n.title || "";
+}
+const noticeLive = (n) => (n.date || TODAY) >= TODAY;
+function noticeWhen(n) {
+  if (n.kind === "call") return `${n.date === TODAY ? "오늘" : fmtShort(n.date)} ${n.time || ""}`.trim();
+  if (n.kind === "task") return `${fmtShort(n.date)} 마감 · ${rel(n.date)}`;
+  return `${fmtShort(n.date)}까지`;
 }
 
 const REG_KEY = "school-registry-v1";
@@ -85,13 +131,27 @@ async function joinRegistry({ school, dept, subject }) {
   try { await window.storage.set(REG_KEY, JSON.stringify(reg), true); } catch (e) { /* 무시 */ }
 }
 
+// 학급 컴퓨터도 명부에 남긴다. 교사가 알림을 보낼 때 "지금 켜져 있는 학급"으로 뜬다.
+async function joinRegistryClass({ school, grade, classNo }) {
+  if (!school || !grade || !classNo) return;
+  let reg = {};
+  try { const r = await window.storage.get(REG_KEY, true); reg = r ? JSON.parse(r.value) : {}; } catch (e) { reg = {}; }
+  const cur = reg[school] || { depts: [], subjects: [], count: 0 };
+  cur.classes = cur.classes || [];
+  const c = `${grade}-${classNo}`;
+  if (!cur.classes.includes(c)) cur.classes.push(c);
+  cur.classes.sort();
+  reg[school] = cur;
+  try { await window.storage.set(REG_KEY, JSON.stringify(reg), true); } catch (e) { /* 무시 */ }
+}
+
 function fileKind(file) {
   const n = (file.name || "").toLowerCase();
   if (/\.(hwp|hwpx)$/.test(n)) return "hwp";
   if (/\.(xlsx|xlsm|xls)$/.test(n)) return "excel";
   if (/\.docx$/.test(n)) return "word";
   if (/\.(doc|ppt|pptx|zip)$/.test(n)) return "office";
-  if (file.type === "application/pdf") return "pdf";
+  if (file.type === "application/pdf" || n.endsWith(".pdf")) return "pdf";
   if (file.type && file.type.startsWith("image/")) return "image";
   if ((file.type && file.type.startsWith("text/")) || /\.(txt|csv|md|json)$/.test(n)) return "text";
   return "unknown";
@@ -156,7 +216,7 @@ async function toBlock(file) {
   if (file.type === "application/pdf")
     return { kind: "doc", name: file.name, block: { type: "document", source: { type: "base64", media_type: "application/pdf", data: b64 } } };
   if (file.type.startsWith("image/"))
-    return { kind: "image", name: file.name, url: URL.createObjectURL(file), block: { type: "image", source: { type: "base64", media_type: file.type, data: b64 } } };
+    return { kind: "image", name: file.name, block: { type: "image", source: { type: "base64", media_type: file.type, data: b64 } } };
   return { kind: "unsupported", name: file.name };
 }
 
@@ -206,6 +266,7 @@ export default function App() {
   const [items, setItems] = useState([]);
   const [events, setEvents] = useState([]);
   const [feed, setFeed] = useState([]);
+  const [notices, setNotices] = useState([]);
   const [ready, setReady] = useState(false);
   const [view, setView] = useState("clip");
   const [sel, setSel] = useState(null);
@@ -223,6 +284,13 @@ export default function App() {
     })();
   }, []);
   useEffect(() => { if (ready) window.storage.set("teacher-desk2", JSON.stringify({ me, tt, items, events })).catch(() => {}); }, [me, tt, items, events, ready]);
+
+  // 자정을 넘겨도 날짜가 어제로 남아 있지 않게 한다.
+  const [, setDayTick] = useState(TODAY);
+  useEffect(() => {
+    const t = setInterval(() => { if (bumpToday()) setDayTick(TODAY); }, 60000);
+    return () => clearInterval(t);
+  }, []);
 
   const dayInfo = useMemo(() => (d) => {
     const w = parseISO(d).getDay();
@@ -246,7 +314,7 @@ export default function App() {
       setDeptHint([...new Set([...list, me.dept])].join(", "));
     });
   }, [me]);
-  const feedKey = me ? `feed2-${slug(me.school)}` : null;
+  const feedKey = me && !isClass(me) ? `feed2-${slug(me.school)}` : null; // 교실 컴은 업무 피드를 안 읽는다
 
   const pull = useCallback(async () => {
     if (!feedKey) return;
@@ -258,10 +326,53 @@ export default function App() {
   useEffect(() => { pull(); }, [pull]);
   useEffect(() => { if (!feedKey) return; const t = setInterval(pull, 20000); return () => clearInterval(t); }, [feedKey, pull]);
 
+  const noticeK = me && me.school ? noticeKey(me.school) : null;
+
+  const pullNotices = useCallback(async () => {
+    if (!noticeK) return;
+    try {
+      const r = await window.storage.get(noticeK, true);
+      setNotices(r ? JSON.parse(r.value) : []);
+    } catch (e) { setNotices([]); }
+  }, [noticeK]);
+
+  useEffect(() => { pullNotices(); }, [pullNotices]);
+  useEffect(() => { if (!noticeK) return; const t = setInterval(pullNotices, 20000); return () => clearInterval(t); }, [noticeK, pullNotices]);
+
+  // 알림 하나를 문서 앞에 붙인다. 지난 것은 30개까지만 남긴다.
+  async function pushNotice(n) {
+    if (!noticeK) return;
+    let cur = [];
+    try { const r = await window.storage.get(noticeK, true); cur = r ? JSON.parse(r.value) : []; }
+    catch (e) { throw new Error("알림을 읽지 못했습니다. 잠시 뒤 다시 시도해 주세요."); }
+    const all = [n, ...cur];
+    const next = [...all.filter(noticeLive), ...all.filter((x) => !noticeLive(x)).slice(0, 30)];
+    await window.storage.set(noticeK, JSON.stringify(next), true);
+    setNotices(next);
+  }
+
+  // 학급이 "확인했어요"를 누르면 보낸 교사 쪽에 읽음으로 뜬다.
+  async function ackNotice(id, cls) {
+    if (!noticeK) return;
+    let cur = [];
+    try { const r = await window.storage.get(noticeK, true); cur = r ? JSON.parse(r.value) : []; }
+    catch (e) { throw new Error("알림을 읽지 못했습니다. 잠시 뒤 다시 시도해 주세요."); }
+    const next = cur.map((n) => {
+      if (n.id !== id) return n;
+      const seen = n.seen || [];
+      if (seen.some((x) => x.cls === cls)) return n;
+      return { ...n, seen: [...seen, { cls, at: new Date().toISOString() }] };
+    });
+    await window.storage.set(noticeK, JSON.stringify(next), true);
+    setNotices(next);
+  }
+
   async function push(msg) {
     if (!feedKey) return;
     let cur = [];
-    try { const r = await window.storage.get(feedKey, true); cur = r ? JSON.parse(r.value) : []; } catch (e) { cur = []; }
+    // 읽기 실패를 빈 배열로 넘기면 학교 전체 목록을 덮어써 버린다.
+    try { const r = await window.storage.get(feedKey, true); cur = r ? JSON.parse(r.value) : []; }
+    catch (e) { throw new Error("목록을 읽지 못했습니다. 잠시 뒤 다시 시도해 주세요."); }
     const next = [msg, ...cur].slice(0, 80);
     await window.storage.set(feedKey, JSON.stringify(next), true);
     setFeed(next);
@@ -270,7 +381,19 @@ export default function App() {
   const addItems = (arr) => setItems((p) => [...p, ...arr]);
 
   if (!ready) return <Shell><p style={{ padding: 40, color: S.muted }}>불러오는 중</p></Shell>;
-  if (!me) return <Setup onDone={(p) => { joinRegistry(p); setMe(p); }} />;
+  if (!me) return <Setup onDone={(p) => { if (isClass(p)) joinRegistryClass(p); else joinRegistry(p); setMe(p); }} />;
+
+  if (isClass(me)) {
+    return (
+      <ClassBoard
+        me={me}
+        notices={notices}
+        onAck={(id) => ackNotice(id, clsName(me)).catch(() => {})}
+        onSync={pullNotices}
+        onReset={() => setMe(null)}
+      />
+    );
+  }
 
   const myIds = new Set(groups.map((g) => g.id));
   const inbox = feed.filter((m) => myIds.has(m.gid) && m.from !== me.nick);
@@ -281,11 +404,9 @@ export default function App() {
   if (widget || pop.out) {
     return (
       <Shell>
-        <div ref={pop.slot}>
-          <div ref={pop.holder}>
-            <WidgetPanel dayInfo={dayInfo} items={items} inbox={inbox} setItems={setItems} pinned={pop.out} />
-          </div>
-        </div>
+        {pop.out
+          ? createPortal(<WidgetPanel dayInfo={dayInfo} items={items} inbox={inbox} setItems={setItems} pinned />, pop.body)
+          : <WidgetPanel dayInfo={dayInfo} items={items} inbox={inbox} setItems={setItems} pinned={false} />}
         {pop.out ? (
           <div style={{ padding: 36, textAlign: "center", maxWidth: 360 }}>
             <Pin size={22} color={S.green} />
@@ -329,6 +450,8 @@ export default function App() {
             {view === "sent" && <SentList msgs={sent} groups={groups} />}
             {view === "cal" && <CalView items={items} setItems={setItems} dayInfo={dayInfo} events={events} />}
             {view === "tt" && <SchoolTab tt={tt} setTt={setTt} events={events} setEvents={setEvents} />}
+            {view === "notice" && <NoticeComposer me={me} tt={tt} pushNotice={pushNotice} onSent={() => setView("noticed")} />}
+            {view === "noticed" && <SentNotices me={me} notices={notices} onRefresh={pullNotices} />}
           </div>
         </div>
       </div>
@@ -381,8 +504,9 @@ function CaptureView({ addItems, goCal, deptHint }) {
         setErr("읽을 수 있는 자료가 없습니다. 내용을 복사해서 붙여넣어 보세요.");
         setBusy(false); return;
       }
-      for (const f of usable) {
-        const b = await toBlock(f.file);
+      // 파일마다 차례로 기다리면 그만큼 느리다. 동시에 읽고 순서대로 붙인다.
+      const blocks = await Promise.all(usable.map((f) => toBlock(f.file)));
+      for (const b of blocks) {
         if (b.kind === "text") body += `\n\n[${b.name}]\n${b.text}`;
         else if (b.block) parts.push(b.block);
       }
@@ -419,7 +543,7 @@ quality 기준
 
 예시 2
 입력: "샘 담주 화까지 우리 반 봉사시간 정리해서 저한테 주실 수 있어요? 학년부에서 취합한대요"
-출력: {"read":"봉사시간 정리 요청 메시지","quality":"good","reason":"","tasks":[{"title":"학급 봉사시간 정리","who":"학년부","dept":"학년부","due":"(다음 주 화요일 날짜)","note":"학년부 취합","evidence":"담주 화까지","sure":true}]}
+출력: {"read":"봉사시간 정리 요청 메시지","quality":"good","reason":"","tasks":[{"title":"학급 봉사시간 정리","who":"학년부","dept":"학년부","due":"${addDays(TODAY, 5)}","note":"학년부 취합","evidence":"담주 화까지","sure":true}]}
 
 예시 3 (마감이 없는 경우)
 입력: "9월 교직원 협의회 안내 - 9월 3일 15시 시청각실"
@@ -451,6 +575,10 @@ ${body || "(첨부만 있음)"}` });
 
   function commit() {
     const picked = found.filter((f) => f._on);
+    // 날짜가 깨진 채 들어가면 달력 어디에도 안 뜨면서 건수만 올라간다.
+    const bad = picked.find((f) => !isDay(f.due));
+    if (bad) { setErr(`"${bad.title}" 의 마감일을 먼저 채워 주세요.`); return; }
+    setErr("");
     addItems(picked.map((f) => ({ id: uid(), title: f.title, who: f.who || "미상", dept: f.dept || "기타", due: f.due, note: f.note || "", evidence: f.evidence || "", raw: f._raw || "", done: false })));
     setFound(null); setMeta(null); setText(""); setFiles([]); goCal();
   }
@@ -521,6 +649,7 @@ ${body || "(첨부만 있음)"}` });
           </div>
         ))}
 
+        {err && <p style={{ fontSize: 12.5, color: S.red, margin: "10px 0 0" }}>{err}</p>}
         <button onClick={commit} disabled={!found.some((f) => f._on)} style={{ ...primaryBtn, marginTop: 8, opacity: found.some((f) => f._on) ? 1 : 0.45 }}>
           <Calendar size={15} /><span style={{ marginLeft: 7 }}>선택한 {found.filter((f) => f._on).length}건 일정 등록</span>
         </button>
@@ -549,7 +678,7 @@ ${body || "(첨부만 있음)"}` });
           {drag ? "여기에 놓으세요" : "Ctrl+V 로 붙여넣기"}
         </p>
         <p style={{ fontSize: 12.5, color: S.muted, margin: 0 }}>파일을 끌어다 놓거나 눌러서 고르기</p>
-        <input ref={inputRef} type="file" multiple accept="image/*,.pdf,.txt,.csv,.hwp,.hwpx,.docx" onClick={(e) => e.stopPropagation()}
+        <input ref={inputRef} type="file" multiple accept="image/*,.pdf,.xlsx,.xls,.docx,.txt,.csv,.hwp,.hwpx" onClick={(e) => e.stopPropagation()}
           onChange={(e) => { addFiles(e.target.files); e.target.value = ""; }} style={{ display: "none" }} />
       </div>
 
@@ -639,13 +768,11 @@ ${body || "(첨부만 있음)"}` });
 }
 
 function usePopOut() {
-  const holder = useRef(null);
-  const slot = useRef(null);
-  const [out, setOut] = useState(false);
+  const [body, setBody] = useState(null);
   const supported = typeof window !== "undefined" && "documentPictureInPicture" in window;
 
   const open = useCallback(async () => {
-    if (!supported || !holder.current) return false;
+    if (!supported) return false;
     try {
       const pip = await window.documentPictureInPicture.requestWindow({ width: 360, height: 660 });
       const link = pip.document.createElement("link");
@@ -656,17 +783,14 @@ function usePopOut() {
       pip.document.body.style.background = "#fff";
       pip.document.body.style.fontFamily = "Pretendard, -apple-system, sans-serif";
       pip.document.title = "오늘 업무";
-      pip.document.body.append(holder.current);
-      setOut(true);
-      pip.addEventListener("pagehide", () => {
-        if (slot.current && holder.current) slot.current.append(holder.current);
-        setOut(false);
-      });
+      // DOM 을 그 창으로 옮기면 React 이벤트가 끊긴다. 포털로 그 창에 그린다.
+      setBody(pip.document.body);
+      pip.addEventListener("pagehide", () => setBody(null));
       return true;
     } catch (e) { return false; }
   }, [supported]);
 
-  return { holder, slot, out, open, supported };
+  return { body, out: !!body, open, supported };
 }
 
 function PeriodBar({ info, h = 34, max = 86 }) {
@@ -713,7 +837,124 @@ function Shell({ children }) {
 }
 
 function Setup({ onDone }) {
-  const [f, setF] = useState({ school: "", dept: "", homeroom: true, grade: "3", classNo: "", subject: "", nick: "" });
+  const [role, setRole] = useState(null);
+  if (role === null) return <RolePick onPick={setRole} />;
+  if (role === "class") return <ClassSetup onDone={onDone} onBack={() => setRole(null)} />;
+  return <TeacherSetup onDone={onDone} onBack={() => setRole(null)} />;
+}
+
+// 이 컴퓨터가 누구 것인지부터 고른다. 교무실 개인 컴이면 교사, 교실 앞 컴이면 학급.
+function RolePick({ onPick }) {
+  const card = {
+    display: "flex", alignItems: "center", gap: 14, width: "100%", textAlign: "left",
+    padding: "18px 18px", marginBottom: 10, border: `1px solid ${S.line}`, borderRadius: 9,
+    background: S.bg, cursor: "pointer", fontFamily: "inherit", color: S.ink,
+  };
+  return (
+    <Shell>
+      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+        <div style={{ width: 430, background: S.bg, borderRadius: 10, padding: 30, border: `1px solid ${S.line}` }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 6 }}>
+            <School size={20} color={S.brand} />
+            <h1 style={{ fontSize: 19, fontWeight: 700, margin: 0 }}>이 컴퓨터는</h1>
+          </div>
+          <p style={{ fontSize: 13, color: S.muted, margin: "0 0 22px", lineHeight: 1.6 }}>
+            한 번만 고르면 다음부터는 바로 그 화면으로 열립니다.
+          </p>
+          <button onClick={() => onPick("teacher")} style={card}>
+            <div style={{ width: 42, height: 42, borderRadius: 8, background: S.brand, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+              <Users size={20} color="#fff" />
+            </div>
+            <span style={{ flex: 1 }}>
+              <span style={{ display: "block", fontSize: 15, fontWeight: 700 }}>선생님 컴퓨터</span>
+              <span style={{ display: "block", fontSize: 12.5, color: S.muted, marginTop: 2 }}>업무 요청 주고받기, 학급으로 알림 보내기</span>
+            </span>
+          </button>
+          <button onClick={() => onPick("class")} style={card}>
+            <div style={{ width: 42, height: 42, borderRadius: 8, background: S.green, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+              <Monitor size={20} color="#fff" />
+            </div>
+            <span style={{ flex: 1 }}>
+              <span style={{ display: "block", fontSize: 15, fontWeight: 700 }}>학급 컴퓨터 (교실)</span>
+              <span style={{ display: "block", fontSize: 12.5, color: S.muted, marginTop: 2 }}>선생님이 보낸 호출·전달·과제를 큰 글씨로 띄웁니다</span>
+            </span>
+          </button>
+        </div>
+      </div>
+    </Shell>
+  );
+}
+
+// 교실 컴퓨터 로그인. 학교와 학급만 고르면 된다.
+function ClassSetup({ onDone, onBack }) {
+  const [f, setF] = useState({ school: "", grade: "", classNo: "" });
+  const [reg, setReg] = useState(null);
+  useEffect(() => { loadRegistry().then(setReg); }, []);
+
+  const typed = f.school.trim();
+  const schools = reg ? Object.keys(reg) : [];
+  const suggestions = typed ? schools.filter((s) => s.includes(typed) && s !== typed) : schools;
+  const ok = typed && f.grade && f.classNo;
+
+  return (
+    <Shell>
+      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+        <div style={{ width: 430, background: S.bg, borderRadius: 10, padding: 30, border: `1px solid ${S.line}` }}>
+          <button onClick={onBack} style={{ ...bare, display: "flex", alignItems: "center", gap: 5, fontSize: 12.5, color: S.muted, cursor: "pointer", marginBottom: 12 }}>
+            <ArrowLeft size={14} /> 뒤로
+          </button>
+          <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 6 }}>
+            <Monitor size={20} color={S.green} />
+            <h1 style={{ fontSize: 19, fontWeight: 700, margin: 0 }}>학급 컴퓨터 로그인</h1>
+          </div>
+          <p style={{ fontSize: 13, color: S.muted, margin: "0 0 22px", lineHeight: 1.6 }}>
+            이 교실이 몇 학년 몇 반인지만 알려 주세요. 선생님들이 이 반으로 보낸 알림이 화면에 뜹니다.
+          </p>
+
+          <div style={{ marginBottom: 6 }}>
+            <L>학교명</L>
+            <input value={f.school} onChange={(e) => setF({ ...f, school: e.target.value })} placeholder="예: 서울미술고등학교" style={inputStyle} />
+          </div>
+          {reg === null && <p style={{ fontSize: 12, color: S.faint, margin: "0 0 14px" }}>등록된 학교 불러오는 중</p>}
+          {reg !== null && suggestions.length > 0 && (
+            <div style={{ margin: "0 0 14px" }}>
+              <p style={{ fontSize: 11.5, color: S.faint, margin: "0 0 6px" }}>이미 쓰고 있는 학교</p>
+              <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+                {suggestions.slice(0, 6).map((s) => (
+                  <button key={s} onClick={() => setF({ ...f, school: s })} style={{
+                    display: "flex", alignItems: "center", gap: 6, padding: "6px 11px", borderRadius: 14, fontSize: 12.5,
+                    border: `1px solid ${S.line}`, background: S.bg, color: S.ink, cursor: "pointer", fontFamily: "inherit",
+                  }}><School size={12} color={S.brand} />{s}</button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div style={{ background: S.gray, borderRadius: 8, padding: "13px 14px", marginBottom: 16 }}>
+            <L>학년</L>
+            <div style={{ display: "flex", gap: 6, marginBottom: 13 }}>
+              {["1", "2", "3"].map((g) => <button key={g} onClick={() => setF({ ...f, grade: g })} style={numBtn(f.grade === g, 54)}>{g}학년</button>)}
+            </div>
+            <L>반</L>
+            <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+              {CLASS_NOS.map((c) => <button key={c} onClick={() => setF({ ...f, classNo: c })} style={numBtn(f.classNo === c, 36)}>{c}</button>)}
+            </div>
+            {ok && <p style={{ fontSize: 12.5, fontWeight: 700, color: S.green, margin: "12px 0 0" }}>{f.grade}학년 {f.classNo}반 교실</p>}
+          </div>
+
+          <p style={{ fontSize: 11.5, color: S.yellowInk, background: S.yellowSoft, padding: "9px 11px", borderRadius: 6, lineHeight: 1.55, margin: "0 0 16px" }}>
+            교실 화면은 학생들이 다 봅니다. 개인 상담 같은 내용은 보내지 마세요.
+          </p>
+          <button disabled={!ok} onClick={() => onDone({ role: "class", school: typed, grade: f.grade, classNo: f.classNo, nick: `${f.grade}-${f.classNo} 교실` })}
+            style={{ ...primaryBtn, width: "100%", opacity: ok ? 1 : 0.45 }}>이 교실로 열기</button>
+        </div>
+      </div>
+    </Shell>
+  );
+}
+
+function TeacherSetup({ onDone, onBack }) {
+  const [f, setF] = useState({ role: "teacher", school: "", dept: "", homeroom: true, grade: "3", classNo: "", subject: "", nick: "" });
   const [reg, setReg] = useState(null);
   const [newDept, setNewDept] = useState("");
   const [adding, setAdding] = useState(false);
@@ -735,9 +976,12 @@ function Setup({ onDone }) {
     <Shell>
       <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
         <div style={{ width: 430, background: S.bg, borderRadius: 10, padding: 30, border: `1px solid ${S.line}` }}>
+          <button onClick={onBack} style={{ ...bare, display: "flex", alignItems: "center", gap: 5, fontSize: 12.5, color: S.muted, cursor: "pointer", marginBottom: 12 }}>
+            <ArrowLeft size={14} /> 뒤로
+          </button>
           <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 6 }}>
             <School size={20} color={S.brand} />
-            <h1 style={{ fontSize: 19, fontWeight: 700, margin: 0 }}>처음 설정</h1>
+            <h1 style={{ fontSize: 19, fontWeight: 700, margin: 0 }}>선생님 처음 설정</h1>
           </div>
           <p style={{ fontSize: 13, color: S.muted, margin: "0 0 22px", lineHeight: 1.6 }}>
             입력한 내용으로 그룹이 자동으로 만들어집니다. 그룹을 따로 만들거나 초대할 필요가 없습니다.
@@ -863,7 +1107,7 @@ function Setup({ onDone }) {
           <p style={{ fontSize: 11.5, color: S.yellowInk, background: S.yellowSoft, padding: "9px 11px", borderRadius: 6, lineHeight: 1.55, margin: "0 0 16px" }}>
             그룹으로 주고받는 내용은 이 앱을 쓰는 다른 사람에게도 보입니다. 학생 이름이나 개인정보는 넣지 마세요. 캡처로 담은 내 일정은 나만 봅니다.
           </p>
-          <button disabled={!ok} onClick={() => onDone({ ...f, school: f.school.trim(), dept: f.dept.trim(), subject: f.subject.trim(), nick: f.nick.trim() })}
+          <button disabled={!ok} onClick={() => onDone({ ...f, role: "teacher", school: f.school.trim(), dept: f.dept.trim(), subject: f.subject.trim(), nick: f.nick.trim() })}
             style={{ ...primaryBtn, width: "100%", opacity: ok ? 1 : 0.45 }}>시작하기</button>
         </div>
       </div>
@@ -878,6 +1122,8 @@ function Sidebar({ me, groups, sel, setSel, view, setView, pending, feed, onRese
     { k: "inbox", label: "받은 요청", Icon: Inbox, badge: pending },
     { k: "send", label: "보내기", Icon: Send },
     { k: "sent", label: "보낸 요청", Icon: Users },
+    { k: "notice", label: "학급 알림", Icon: Megaphone },
+    { k: "noticed", label: "보낸 학급 알림", Icon: Monitor },
     { k: "tt", label: "시간표", Icon: School },
   ];
   return (
@@ -965,11 +1211,18 @@ function Composer({ me, groups, push, onSent }) {
   const [gid, setGid] = useState(groups[0] ? groups[0].id : "");
   const [title, setTitle] = useState(""); const [body, setBody] = useState("");
   const [due, setDue] = useState(addDays(TODAY, 3)); const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
   async function send() {
     if (!title.trim() || !gid) return;
-    setBusy(true);
-    await push({ id: uid(), gid, from: me.nick, role: me.dept, title: title.trim(), body: body.trim(), due, at: new Date().toISOString() });
-    setTitle(""); setBody(""); setBusy(false); onSent();
+    // 화면은 마감일이 필수라고 안내한다. 빈 값이면 여기서 막는다.
+    if (!isDay(due)) { setErr("마감일을 정해 주세요."); return; }
+    setErr(""); setBusy(true);
+    try {
+      await push({ id: uid(), gid, from: me.nick, role: me.dept, title: title.trim(), body: body.trim(), due, at: new Date().toISOString() });
+      setTitle(""); setBody(""); onSent();
+    } catch (e) {
+      setErr((e && e.message) || "보내지 못했습니다. 잠시 뒤 다시 시도해 주세요.");
+    } finally { setBusy(false); }
   }
   return (
     <div style={{ padding: "22px 20px", maxWidth: 620 }}>
@@ -988,6 +1241,7 @@ function Composer({ me, groups, push, onSent }) {
         <L>마감 · {rel(due)}</L>
         <input type="date" value={due} onChange={(e) => setDue(e.target.value)} style={inputStyle} />
       </div>
+      {err && <p style={{ fontSize: 12.5, color: S.red, margin: "0 0 10px" }}>{err}</p>}
       <button onClick={send} disabled={busy || !title.trim()} style={{ ...primaryBtn, opacity: title.trim() ? 1 : 0.45 }}>
         {busy ? <Loader size={15} /> : <Send size={15} />}<span style={{ marginLeft: 7 }}>보내기</span>
       </button>
@@ -1234,10 +1488,14 @@ kind 는 아래 넷 중 하나
 - swap 이 아니면 swap 키는 넣지 않는다${extra}` });
         const p2 = await askClaude(parts);
         const list = Array.isArray(p2) ? p2 : (p2.events || []);
-        const ok = list.filter((e) => e && e.start && e.name)
-          .map((e) => ({ start: e.start, end: e.end || e.start, name: String(e.name).slice(0, 20), kind: EV_KIND[e.kind] ? e.kind : "event", swap: e.swap }));
+        // 달력은 날짜를 문자열로 비교한다. YYYY-MM-DD 가 아니면 아무 날에도 안 걸린다.
+        const day = (v) => (isDay(v) ? String(v) : "");
+        const ok = list.filter((e) => e && e.name && day(e.start))
+          .map((e) => ({ start: day(e.start), end: day(e.end) || day(e.start), name: String(e.name).slice(0, 20), kind: EV_KIND[e.kind] ? e.kind : "event", swap: e.swap }))
+          .map((e) => (e.end < e.start ? { ...e, end: e.start } : e));
+        const dropped = list.length - ok.length;
         setEvents(ok);
-        setRead(p2.read || `${ok.length}건을 넣었습니다`);
+        setRead((p2.read || `${ok.length}건을 넣었습니다`) + (dropped > 0 ? ` (날짜를 못 읽은 ${dropped}건은 뺐습니다)` : ""));
       }
     } catch (e) { setErr("읽지 못했습니다. 다른 형식으로 넣어 보세요."); }
     setBusy("");
@@ -1282,7 +1540,7 @@ kind 는 아래 넷 중 하나
             <span style={{ fontSize: 13.5, flex: 1 }}>{e.name}</span>
             {e.swap && <span style={{ fontSize: 11, color: S.blueInk, background: S.blueSoft, borderRadius: 4, padding: "2px 7px", fontWeight: 600 }}>{e.swap}요일</span>}
             <span style={{ fontSize: 11, color: k.color, background: k.bg, borderRadius: 4, padding: "2px 8px", fontWeight: 700 }}>{k.label}</span>
-            <button onClick={() => setEvents((p) => p.filter((_, j) => j !== i))} style={{ ...iconBtn, width: 22, height: 22 }} aria-label="빼기">
+            <button onClick={() => setEvents((p) => p.filter((x) => x !== e))} style={{ ...iconBtn, width: 22, height: 22 }} aria-label="빼기">
               <X size={12} color={S.faint} />
             </button>
           </div>
@@ -1356,6 +1614,304 @@ function WidgetPanel({ dayInfo, items, inbox, setItems, pinned }) {
         </div>
       </div>
     </Shell>
+  );
+}
+
+// ── 교실 화면 ────────────────────────────────────────────────
+// 학급 컴퓨터로 로그인하면 이 화면만 뜬다. 뒤에서 20초마다 새 알림을 받아 온다.
+function ClassBoard({ me, notices, onAck, onSync, onReset }) {
+  const cls = clsName(me);
+  const [now, setNow] = useState(new Date());
+  const [past, setPast] = useState(false);
+  // 교실 컴은 며칠씩 켜 둔다. 날짜가 넘어가면 한 번 새로 읽어 오늘 기준을 다시 잡는다.
+  useEffect(() => {
+    const t = setInterval(() => {
+      const d = new Date();
+      if (iso(d) !== TODAY) { window.location.reload(); return; }
+      setNow(d);
+    }, 15000);
+    return () => clearInterval(t);
+  }, []);
+
+  const mine = notices.filter((n) => Array.isArray(n.classes) && n.classes.includes(cls));
+  const live = mine.filter(noticeLive);
+  const old = mine.filter((n) => !noticeLive(n));
+  const calls = live.filter((n) => n.kind === "call").sort((a, b) => `${a.date}${a.time || ""}`.localeCompare(`${b.date}${b.time || ""}`));
+  const infos = live.filter((n) => n.kind === "info").sort((a, b) => String(b.at).localeCompare(String(a.at)));
+  const tasks = live.filter((n) => n.kind === "task").sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  const hhmm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+
+  const sec = (label, Icon, color, list) => (
+    list.length > 0 && (
+      <div style={{ marginBottom: 26 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 7, margin: "0 0 10px" }}>
+          <Icon size={17} color={color} />
+          <span style={{ fontSize: 15, fontWeight: 700, color }}>{label}</span>
+          <span style={{ fontSize: 13, color: S.faint }}>{list.length}건</span>
+        </div>
+        {list.map((n) => <NoticeCard key={n.id} n={n} cls={cls} onAck={onAck} />)}
+      </div>
+    )
+  );
+
+  return (
+    <Shell>
+      <div style={{ minHeight: "100vh", background: S.gray }}>
+        <div data-drag style={{ background: S.brand, color: "#fff", padding: "16px 24px", display: "flex", alignItems: "center", gap: 16 }}>
+          <div style={{ minWidth: 0 }}>
+            <p style={{ fontSize: 13, color: S.brandText, margin: 0 }}>{me.school}</p>
+            <p style={{ fontSize: 27, fontWeight: 800, margin: "2px 0 0", letterSpacing: -0.5 }}>{me.grade}학년 {me.classNo}반</p>
+          </div>
+          <div style={{ marginLeft: "auto", textAlign: "right" }}>
+            <p style={{ fontSize: 13.5, color: S.brandText, margin: 0 }}>{fmtK(TODAY)}</p>
+            <p style={{ fontSize: 27, fontWeight: 800, margin: "2px 0 0", fontVariantNumeric: "tabular-nums" }}>{hhmm}</p>
+          </div>
+          <button onClick={onSync} style={{ ...iconBtn, background: S.brandHover, width: 34, height: 34 }} aria-label="새로고침">
+            <RefreshCw size={16} color="#fff" />
+          </button>
+        </div>
+
+        <div style={{ padding: "22px 24px 40px", maxWidth: 900, margin: "0 auto" }}>
+          {live.length === 0 && (
+            <div style={{ background: S.bg, border: `1px solid ${S.line}`, borderRadius: 10, padding: "54px 24px", textAlign: "center" }}>
+              <Megaphone size={26} color={S.faint} />
+              <p style={{ fontSize: 17, fontWeight: 700, margin: "12px 0 5px" }}>새 알림이 없습니다</p>
+              <p style={{ fontSize: 13.5, color: S.muted, margin: 0 }}>선생님이 보내면 이 화면에 바로 뜹니다.</p>
+            </div>
+          )}
+          {sec("지금 호출", Bell, NOTICE_KIND.call.color, calls)}
+          {sec("전달사항", Megaphone, NOTICE_KIND.info.color, infos)}
+          {sec("과제", ClipboardList, NOTICE_KIND.task.color, tasks)}
+
+          {old.length > 0 && (
+            <div style={{ marginTop: 10 }}>
+              <button onClick={() => setPast(!past)} style={{ ...ghostBtn, padding: "7px 13px", fontSize: 12.5 }}>
+                {past ? "지난 알림 접기" : `지난 알림 ${old.length}건 보기`}
+              </button>
+              {past && <div style={{ marginTop: 12, opacity: 0.62 }}>{old.map((n) => <NoticeCard key={n.id} n={n} cls={cls} onAck={onAck} />)}</div>}
+            </div>
+          )}
+
+          <button onClick={() => { if (confirm("이 컴퓨터의 학급 설정을 지우고 처음 화면으로 갈까요?")) onReset(); }}
+            style={{ ...bare, fontSize: 11.5, color: S.faint, cursor: "pointer", marginTop: 26 }}>
+            학급 설정 다시 하기
+          </button>
+        </div>
+      </div>
+    </Shell>
+  );
+}
+
+function NoticeCard({ n, cls, onAck }) {
+  const K = NOTICE_KIND[n.kind] || NOTICE_KIND.info;
+  const seen = (n.seen || []).find((x) => x.cls === cls);
+  return (
+    <div style={{ display: "flex", background: S.bg, border: `1px solid ${S.line}`, borderRadius: 10, marginBottom: 9, overflow: "hidden" }}>
+      <div style={{ width: 6, background: K.color, flexShrink: 0 }} />
+      <div style={{ flex: 1, padding: "15px 17px", minWidth: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 7 }}>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 12, fontWeight: 700, color: K.color, background: K.bg, padding: "3px 9px", borderRadius: 12 }}>
+            <K.Icon size={12} />{K.label}
+          </span>
+          <span style={{ fontSize: 17, fontWeight: 800 }}>{targetText(n.target)}</span>
+          <span style={{ fontSize: 12.5, color: S.muted, marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 4 }}>
+            <Clock size={12} />{noticeWhen(n)}
+          </span>
+        </div>
+        <p style={{ fontSize: 21, fontWeight: 700, margin: 0, lineHeight: 1.4 }}>{noticeText(n)}</p>
+        {n.kind === "call" && n.place && (
+          <p style={{ fontSize: 13.5, color: S.muted, margin: "6px 0 0", display: "flex", alignItems: "center", gap: 4 }}>
+            <MapPin size={13} />{n.place}
+          </p>
+        )}
+        {n.body && <p style={{ fontSize: 15, color: S.muted, margin: "7px 0 0", lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{n.body}</p>}
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 12 }}>
+          <span style={{ fontSize: 12.5, color: S.faint }}>{n.from}{n.role ? ` · ${n.role}` : ""}</span>
+          <div style={{ marginLeft: "auto" }}>
+            {seen ? (
+              <span style={{ fontSize: 12.5, color: S.green, fontWeight: 700, display: "inline-flex", alignItems: "center", gap: 4 }}>
+                <Check size={14} strokeWidth={3} />확인함
+              </span>
+            ) : (
+              <button onClick={() => onAck(n.id)} style={actBtnGreen}><Check size={13} strokeWidth={3} /> 확인했어요</button>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── 교사 쪽: 학급으로 보내기 ──────────────────────────────────
+function NoticeComposer({ me, tt, pushNotice, onSent }) {
+  const [kind, setKind] = useState("call");
+  const [picked, setPicked] = useState(() => (me.homeroom && me.grade && me.classNo ? [`${me.grade}-${me.classNo}`] : []));
+  const [gradeTab, setGradeTab] = useState(me.grade || "1");
+  const [target, setTarget] = useState("");
+  const [place, setPlace] = useState("");
+  const [time, setTime] = useState("13:00");
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+  const [date, setDate] = useState(TODAY);
+  const [reg, setReg] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => { loadRegistry().then(setReg); }, []);
+  useEffect(() => { setDate(kind === "task" ? addDays(TODAY, 3) : TODAY); }, [kind]);
+
+  const entry = reg && reg[me.school];
+  const online = (entry && entry.classes) || [];
+  const teaching = [...new Set(Object.values(tt).flat().map((x) => String(x || "").trim()).filter((x) => /^\d+-\d+$/.test(x)))].sort();
+  const quick = [...new Set([...(me.homeroom && me.grade && me.classNo ? [clsName(me)] : []), ...online, ...teaching])];
+  const toggle = (c) => setPicked((p) => (p.includes(c) ? p.filter((x) => x !== c) : [...p, c]));
+  const K = NOTICE_KIND[kind];
+  const ok = picked.length > 0 && (kind === "call" ? place.trim() : title.trim());
+
+  const [err, setErr] = useState("");
+  async function send() {
+    if (!ok) return;
+    setErr(""); setBusy(true);
+    try {
+      await pushNotice({
+        id: uid(), kind, classes: [...picked].sort(), target: target.trim(),
+        place: kind === "call" ? place.trim() : "", time: kind === "call" ? time : "",
+        title: title.trim(), body: body.trim(), date,
+        from: me.nick, role: roleLabel(me), dept: me.dept, at: new Date().toISOString(), seen: [],
+      });
+      setTarget(""); setPlace(""); setTitle(""); setBody("");
+      onSent();
+    } catch (e) {
+      setErr((e && e.message) || "보내지 못했습니다. 잠시 뒤 다시 시도해 주세요.");
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <div style={{ padding: "22px 20px", maxWidth: 640 }}>
+      <h2 style={{ fontSize: 17, fontWeight: 700, margin: "0 0 5px" }}>학급 알림 보내기</h2>
+      <p style={{ fontSize: 13, color: S.muted, margin: "0 0 20px", lineHeight: 1.6 }}>
+        교실 컴퓨터 화면에 큰 글씨로 뜹니다. 학생이 확인을 누르면 보낸 학급 알림에서 볼 수 있습니다.
+      </p>
+
+      <L>무엇을</L>
+      <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
+        {Object.keys(NOTICE_KIND).map((k) => {
+          const N = NOTICE_KIND[k];
+          return (
+            <button key={k} onClick={() => setKind(k)} style={{
+              display: "flex", alignItems: "center", gap: 5, padding: "8px 14px", borderRadius: 7, fontSize: 13, fontWeight: 700,
+              border: `1px solid ${kind === k ? N.color : "#DDD"}`, background: kind === k ? N.bg : S.bg,
+              color: kind === k ? N.color : S.muted, cursor: "pointer", fontFamily: "inherit",
+            }}><N.Icon size={14} />{N.label}</button>
+          );
+        })}
+      </div>
+
+      <L>어느 학급으로</L>
+      {quick.length > 0 && (
+        <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginBottom: 8 }}>
+          {quick.map((c) => <Chip key={c} label={c} on={picked.includes(c)} onClick={() => toggle(c)} color={S.green} />)}
+        </div>
+      )}
+      <div style={{ background: S.gray, borderRadius: 8, padding: "11px 12px", marginBottom: 8 }}>
+        <div style={{ display: "flex", gap: 6, marginBottom: 9 }}>
+          {["1", "2", "3"].map((g) => <button key={g} onClick={() => setGradeTab(g)} style={numBtn(gradeTab === g, 54)}>{g}학년</button>)}
+        </div>
+        <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+          {CLASS_NOS.map((c) => {
+            const id = `${gradeTab}-${c}`;
+            return <button key={id} onClick={() => toggle(id)} style={numBtn(picked.includes(id), 36)}>{c}</button>;
+          })}
+        </div>
+        <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
+          <button onClick={() => setPicked([...new Set([...picked, ...CLASS_NOS.map((c) => `${gradeTab}-${c}`)])])} style={{ ...ghostBtn, padding: "6px 11px", fontSize: 12 }}>{gradeTab}학년 전체</button>
+          {picked.length > 0 && <button onClick={() => setPicked([])} style={{ ...ghostBtn, padding: "6px 11px", fontSize: 12 }}>선택 해제</button>}
+        </div>
+      </div>
+      <p style={{ fontSize: 12, color: picked.length ? S.green : S.faint, fontWeight: 600, margin: "0 0 16px" }}>
+        {picked.length ? `${[...picked].sort().join(", ")} — ${picked.length}개 학급` : "보낼 학급을 고르세요"}
+      </p>
+
+      <F label="누구에게 (비우면 반 전체)" v={target} on={setTarget} ph="예: 김민준 / 미술동아리" />
+
+      {kind === "call" && (
+        <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
+          <div style={{ flex: 1 }}>
+            <L>어디로</L>
+            <input value={place} onChange={(e) => setPlace(e.target.value)} placeholder="예: 미술실" style={inputStyle} />
+          </div>
+          <div style={{ width: 130 }}>
+            <L>몇 시까지</L>
+            <input type="time" value={time} onChange={(e) => setTime(e.target.value)} style={inputStyle} />
+          </div>
+        </div>
+      )}
+      {kind !== "call" && <F label={kind === "task" ? "과제 내용" : "전달할 내용"} v={title} on={setTitle} ph={kind === "task" ? "예: 미술 수행평가 자료 제출" : "예: 내일 체육복 챙겨 오기"} />}
+
+      <div style={{ marginBottom: 14 }}>
+        <L>덧붙일 말 (선택)</L>
+        <textarea value={body} onChange={(e) => setBody(e.target.value)} placeholder="준비물이나 제출 방법 등" style={{ ...inputStyle, minHeight: 70, lineHeight: 1.6, resize: "vertical" }} />
+      </div>
+
+      <div style={{ marginBottom: 18, maxWidth: 220 }}>
+        <L>{K.dateLabel} · {rel(date)}</L>
+        <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={inputStyle} />
+      </div>
+
+      <div style={{ background: K.bg, borderRadius: 8, padding: "13px 15px", marginBottom: 18 }}>
+        <p style={{ fontSize: 11.5, fontWeight: 700, color: K.color, margin: "0 0 6px" }}>교실 화면에 이렇게 뜹니다</p>
+        <p style={{ fontSize: 16, fontWeight: 700, margin: 0, color: S.ink }}>
+          {targetText(target)}, {noticeText({ kind, place, time, title }) || "…"}
+        </p>
+      </div>
+
+      {err && <p style={{ fontSize: 12.5, color: S.red, margin: "0 0 10px" }}>{err}</p>}
+      <button onClick={send} disabled={busy || !ok} style={{ ...primaryBtn, opacity: ok ? 1 : 0.45 }}>
+        {busy ? <Loader size={15} /> : <Megaphone size={15} />}<span style={{ marginLeft: 7 }}>교실로 보내기</span>
+      </button>
+    </div>
+  );
+}
+
+function SentNotices({ me, notices, onRefresh }) {
+  const mine = notices.filter((n) => n.from === me.nick).sort((a, b) => String(b.at).localeCompare(String(a.at)));
+  if (mine.length === 0) return <Empty title="보낸 학급 알림이 없습니다" sub="학급 알림에서 반을 고르고 호출이나 전달을 보내보세요." />;
+  return (
+    <div style={{ padding: "8px 0" }}>
+      <div style={{ padding: "8px 18px" }}>
+        <button onClick={onRefresh} style={{ ...ghostBtn, padding: "6px 11px", fontSize: 12 }}><RefreshCw size={13} /><span style={{ marginLeft: 5 }}>확인 현황 새로고침</span></button>
+      </div>
+      {mine.map((n) => {
+        const K = NOTICE_KIND[n.kind] || NOTICE_KIND.info;
+        const seen = n.seen || [];
+        return (
+          <div key={n.id} style={{ padding: "12px 18px", borderBottom: `1px solid ${S.line}`, opacity: noticeLive(n) ? 1 : 0.55 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11.5, fontWeight: 700, color: K.color, background: K.bg, padding: "2px 8px", borderRadius: 11 }}>
+                <K.Icon size={11} />{K.label}
+              </span>
+              <span style={{ fontSize: 12.5, fontWeight: 700 }}>{targetText(n.target)}</span>
+              <span style={{ fontSize: 11.5, color: S.faint, marginLeft: "auto" }}>{noticeWhen(n)}</span>
+            </div>
+            <p style={{ fontSize: 14.5, fontWeight: 600, margin: "5px 0 0" }}>{noticeText(n)}</p>
+            {n.body && <p style={{ fontSize: 13, color: S.muted, margin: "3px 0 0" }}>{n.body}</p>}
+            <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginTop: 8 }}>
+              {(n.classes || []).map((c) => {
+                const on = seen.some((x) => x.cls === c);
+                return (
+                  <span key={c} style={{
+                    display: "inline-flex", alignItems: "center", gap: 3, fontSize: 11.5, fontWeight: 600, padding: "3px 9px", borderRadius: 11,
+                    background: on ? S.greenSoft : S.gray, color: on ? S.green : S.muted,
+                  }}>{on && <Check size={11} strokeWidth={3} />}{c}</span>
+                );
+              })}
+              <span style={{ fontSize: 11.5, color: S.faint, marginLeft: 4, alignSelf: "center" }}>
+                {seen.length}/{(n.classes || []).length} 확인
+              </span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
