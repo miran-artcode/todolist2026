@@ -1,0 +1,23 @@
+rules_version = '2';
+
+// 공유 저장소는 shared 컬렉션 하나만 쓴다.
+// 문서 하나는 { value: 문자열, at: 시각 } 모양이고, 그 밖의 경로는 전부 막는다.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    match /shared/{key} {
+      allow read: if true;
+
+      allow create, update: if
+           request.resource.data.keys().hasOnly(['value', 'at'])
+        && request.resource.data.value is string
+        && request.resource.data.value.size() < 900000;
+
+      allow delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

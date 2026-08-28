@@ -1,0 +1,13 @@
+{
+  "name": "today-work-functions",
+  "description": "Claude API 프록시. API 키를 브라우저에 내보내지 않으려고 둔다.",
+  "main": "index.js",
+  "engines": {
+    "node": "22"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.122.0",
+    "firebase-functions": "^6.4.0"
+  },
+  "private": true
+}

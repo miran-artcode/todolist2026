@@ -1,6 +1,4 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
-import * as XLSX from "xlsx";
-import mammoth from "mammoth";
 import { Camera, Check, Hash, Send, Loader, Upload, Calendar, School, PanelRightClose, RefreshCw, X, ChevronLeft, ChevronRight, FileText, AlertTriangle, ClipboardPaste, Plus, Users, Inbox, Pin, Image as ImageIcon } from "lucide-react";
 
 const S = {
@@ -100,6 +98,8 @@ function fileKind(file) {
 }
 
 async function excelToText(file) {
+  // 엑셀/워드 해석기는 덩치가 커서 파일을 실제로 넣을 때만 받아 온다
+  const XLSX = await import("xlsx");
   const buf = await file.arrayBuffer();
   const wb = XLSX.read(buf, { type: "array", cellDates: true });
   return wb.SheetNames.map((name) => {
@@ -109,6 +109,7 @@ async function excelToText(file) {
 }
 
 async function wordToText(file) {
+  const mammoth = (await import("mammoth")).default;
   const buf = await file.arrayBuffer();
   const r = await mammoth.extractRawText({ arrayBuffer: buf });
   return String(r.value || "").slice(0, 20000);
@@ -176,14 +177,27 @@ function verify(x) {
   return { sure, _warn: warn };
 }
 
+// 실제 호출은 Cloud Functions 프록시가 한다. 브라우저에 API 키를 둘 수 없기 때문.
+// 주소는 빌드할 때 VITE_AI_ENDPOINT 로 넣는다.
+const AI_ENDPOINT = import.meta.env.VITE_AI_ENDPOINT || "";
+
 async function askClaude(parts) {
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 2000, messages: [{ role: "user", content: parts }] }),
+  if (!AI_ENDPOINT) {
+    const e = new Error("AI 분석이 아직 연결되지 않았습니다. 아래에서 직접 입력해 주세요.");
+    e.code = "no-endpoint";
+    throw e;
+  }
+  const res = await fetch(AI_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ parts }),
   });
-  const data = await res.json();
-  const raw = data.content.filter((c) => c.type === "text").map((c) => c.text).join("");
-  return JSON.parse(raw.replace(/```json|```/g, "").trim());
+  if (!res.ok) {
+    let msg = "";
+    try { msg = (await res.json()).error || ""; } catch (e2) { /* 본문이 JSON 이 아님 */ }
+    throw new Error(msg || `분석 서버가 응답하지 않습니다 (${res.status})`);
+  }
+  return res.json();
 }
 
 export default function App() {
@@ -431,7 +445,7 @@ ${body || "(첨부만 있음)"}` });
         const v = verify(x);
         return { ...x, ...v, _id: uid(), _on: v.sure !== false && meta.quality !== "poor", _raw: snippet };
       }));
-    } catch (e) { setErr("읽지 못했습니다. 다시 시도해 주세요."); }
+    } catch (e) { setErr((e && e.message) || "읽지 못했습니다. 다시 시도해 주세요."); }
     setBusy(false);
   }
 

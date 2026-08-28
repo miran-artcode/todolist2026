@@ -78,20 +78,66 @@ Electron 안에서 도는지 확인하려면 `window.desk?.isElectron` 을 보�
 앱 화면은 `web/` 안에 있습니다. Vite + React 이고, Firebase Hosting 으로 배포합니다.
 
 ```bash
-cd web
-npm install
-npm run build          # web/dist 생성
-
-cd ..
-npm install -g firebase-tools
-firebase login
-firebase deploy --only hosting
+cd web && npm install && npm run build   # web/dist 생성
+cd .. && firebase deploy --only hosting
 ```
 
-프로젝트와 배포 경로는 `.firebaserc` 와 `firebase.json` 에 이미 잡혀 있어서 `firebase init` 을 다시 할 필요는 없습니다.
+`firebase-tools` 가 없으면 `npm install -g firebase-tools` 하고 `firebase login` 을 먼저 합니다.
+프로젝트와 배포 경로는 `.firebaserc` 와 `firebase.json` 에 잡혀 있어서 `firebase init` 은 다시 할 필요가 없습니다.
 
 주소는 `https://seoul-educaion.web.app` 입니다. `main.js` 의 `APP_URL` 기본값으로 박아뒀으니 위젯을 빌드할 때 환경변수를 따로 넘기지 않아도 됩니다.
 
-한 프로젝트 안에 사이트가 둘 있습니다. `seoul-educaion` 이 실제로 쓰는 것이고, `project-1512580517596427239` 는 처음 만들어진 기본 사이트입니다. `firebase.json` 의 `site` 로 배포 대상을 정합니다.
+한 프로젝트 안에 사이트가 둘 있습니다. `seoul-educaion` 이 실제로 쓰는 것이고, `project-1512580517596427239` 는 처음 만들어진 기본 사이트입니다. `firebase.json` 의 `site` 로 대상을 정합니다.
 
-Firebase 설정은 `web/src/firebase.js` 에 있습니다. 웹 API 키는 공개되어도 되는 값입니다. 실제 접근 제어는 Firestore 보안 규칙에서 합니다.
+## 데이터가 어디에 저장되나
+
+앱은 `window.storage` 라는 함수를 씁니다. 원래 Claude 아티팩트 안에서만 있던 것이라, `web/src/storage.js` 에서 다시 만들어 넣었습니다.
+
+| 저장 대상 | 어디에 | 무엇이 |
+| --- | --- | --- |
+| 개인 | 그 브라우저의 `localStorage` | 내 프로필, 시간표, 내 할 일, 학사일정 |
+| 공유 | Firestore `shared` 컬렉션 | 학교 명부, 학교별 업무 요청 피드 |
+
+공유 쪽은 `onSnapshot` 으로 한 번만 연결해 두고 값을 들고 있습니다. 앱이 20초마다 다시 읽어도 서버를 또 부르지 않고, 남이 올린 글은 알아서 따라 들어옵니다.
+
+### 보안 규칙
+
+`firestore.rules` 에 있습니다. `shared` 컬렉션만 열려 있고, 문서는 `{ value: 문자열, at: 시각 }` 모양만 받으며, 삭제는 아무도 못 합니다. 그 밖의 경로는 전부 막혀 있습니다.
+
+규칙을 고쳤으면 아래로 확인합니다. 허용될 것은 허용되고 막힐 것은 막히는지 6가지를 봅니다.
+
+```bash
+firebase deploy --only firestore:rules
+cd web && node rules-check.mjs
+```
+
+**아직 로그인이 없습니다.** 주소를 아는 사람은 누구나 학교 피드를 읽고 쓸 수 있습니다. 학교 밖으로 새면 곤란한 내용을 올릴 거라면, Firebase 콘솔에서 익명 로그인을 켜고 규칙에 `request.auth != null` 을 넣어 조여야 합니다.
+
+## AI 분석 붙이기 (아직 안 켜져 있음)
+
+원문을 붙여넣으면 할 일을 뽑아 주는 기능입니다. **지금은 꺼져 있고, 켜려면 두 가지가 필요합니다.**
+
+브라우저에서 Anthropic 을 직접 부르면 API 키가 그대로 노출됩니다. 그래서 `functions/` 에 프록시를 뒀습니다. 키는 서버에만 있고, 앱은 이 함수를 부릅니다.
+
+1. **Blaze 요금제로 전환.** Cloud Functions 는 무료 요금제에서 못 씁니다. [콘솔](https://console.firebase.google.com/project/project-1512580517596427239/usage/details)에서 바꿉니다. 카드 등록이 필요하지만 실제 과금은 무료 할당량을 넘을 때부터입니다.
+
+2. **API 키를 넣고 배포.**
+
+```bash
+firebase functions:secrets:set ANTHROPIC_API_KEY   # 키를 물어보면 붙여넣기
+firebase deploy --only functions
+```
+
+배포가 끝나면 함수 주소가 나옵니다. 그 주소를 넣어서 웹을 다시 빌드합니다.
+
+```bash
+cd web
+VITE_AI_ENDPOINT=https://asia-northeast3-project-1512580517596427239.cloudfunctions.net/ai npm run build
+cd .. && firebase deploy --only hosting
+```
+
+윈도우 명령 프롬프트에서는 `set VITE_AI_ENDPOINT=...` 를 먼저 하고 `npm run build` 합니다.
+
+주소를 넣지 않고 빌드하면 AI 버튼을 눌렀을 때 "AI 분석이 아직 연결되지 않았습니다" 라고 뜹니다. 나머지 기능은 그대로 돌아가고, 할 일은 직접 입력하면 됩니다.
+
+`functions/index.js` 는 `claude-opus-5` 를 씁니다. 부르는 곳은 `web/src/App.jsx` 의 `askClaude` 입니다.
